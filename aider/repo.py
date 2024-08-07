@@ -260,26 +260,47 @@ class GitRepo:
         except ValueError:
             commit = None
 
-        tree = commit.tree
-        if self.cwd:
-            tree = tree / self.cwd
-            print(f"**get_tracked_files: tree = {tree.path}")
-
         files = set()
         if commit:
             if commit in self.tree_files:
                 files = self.tree_files[commit]
             else:
+                tree = commit.tree
+                if self.subtree_only and self.cwd:
+                    tree = tree / self.cwd
                 start_time = time.perf_counter_ns()
                 files = set(self.normalize_path(blob.path) for blob in tree.traverse() if blob.type == "blob")
                 end_time = time.perf_counter_ns()
-                print(f"**Traverse: processed {len(files)} files in {(end_time - start_time) / 1e9:.4f} seconds")
+                # print(f"**Traverse: processed {len(files)} files in {(end_time - start_time) / 1e9:.4f} seconds")
                 self.tree_files[commit] = set(files)
 
         # Add staged files
         index = self.repo.index
-        staged_files = [path for path, _ in index.entries.keys()]
-        files.update(self.normalize_path(path) for path in staged_files)
+        start_time = time.perf_counter_ns()
+        staged_count = 0
+        in_commit_count = 0
+        mismatch_cwd_prefix_count = 0
+        for path, _ in index.entries.keys():
+            if path in files:
+                in_commit_count += 1
+                continue
+
+            normalized_path = self.normalize_path(path)
+            if normalized_path in files:
+                in_commit_count += 1
+                continue
+
+            if self.subtree_only and self.cwd and not normalized_path.startswith(self.cwd):
+                mismatch_cwd_prefix_count += 1
+                continue
+
+            files.add(normalized_path)
+            staged_count += 1
+
+        end_time = time.perf_counter_ns()
+        # print(f"**Staged: processed {staged_count} files in {(end_time - start_time) / 1e9:.4f} seconds")
+        # print(f"**Staged: in_commit_count = {in_commit_count}")
+        # print(f"**Staged: mismatch_cwd_prefix_count = {mismatch_cwd_prefix_count}")
 
         res = [fname for fname in files if not self.ignored_file(fname)]
 
