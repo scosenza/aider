@@ -121,6 +121,14 @@ class Commands:
             summarize_from_coder=summarize_from_coder,
         )
 
+    def cmd_ask_mode(self, args):
+        "Switch to ask mode (equivalent to /chat-mode ask)"
+        return self.cmd_chat_mode("ask")
+
+    def cmd_code_mode(self, args):
+        "Switch to code mode (equivalent to /chat-mode code)"
+        return self.cmd_chat_mode("code")
+
     def completions_model(self):
         models = litellm.model_cost.keys()
         return models
