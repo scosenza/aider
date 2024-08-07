@@ -83,6 +83,8 @@ class GitRepo:
         # https://github.com/gitpython-developers/GitPython/issues/427
         self.repo = git.Repo(repo_paths.pop(), odbt=git.GitDB)
         self.root = utils.safe_abs_path(self.repo.working_tree_dir)
+        self.cwd = self.normalize_path(Path.cwd().relative_to(self.root))
+        self.cwd = "" if self.cwd == "." else self.cwd
 
         if aider_ignore_file:
             self.aider_ignore_file = Path(aider_ignore_file)
@@ -258,15 +260,20 @@ class GitRepo:
         except ValueError:
             commit = None
 
+        tree = commit.tree
+        if self.cwd:
+            tree = tree / self.cwd
+            print(f"**get_tracked_files: tree = {tree.path}")
+
         files = set()
         if commit:
             if commit in self.tree_files:
                 files = self.tree_files[commit]
             else:
-                for blob in commit.tree.traverse():
-                    if blob.type == "blob":  # blob is a file
-                        files.add(blob.path)
-                files = set(self.normalize_path(path) for path in files)
+                start_time = time.perf_counter_ns()
+                files = set(self.normalize_path(blob.path) for blob in tree.traverse() if blob.type == "blob")
+                end_time = time.perf_counter_ns()
+                print(f"**Traverse: processed {len(files)} files in {(end_time - start_time) / 1e9:.4f} seconds")
                 self.tree_files[commit] = set(files)
 
         # Add staged files
