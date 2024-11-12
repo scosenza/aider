@@ -44,6 +44,7 @@ class GitRepo:
         attribute_commit_message_committer=False,
         commit_prompt=None,
         subtree_only=False,
+        verbose=False,
     ):
         self.io = io
         self.models = models
@@ -57,6 +58,7 @@ class GitRepo:
         self.attribute_commit_message_committer = attribute_commit_message_committer
         self.commit_prompt = commit_prompt
         self.subtree_only = subtree_only
+        self.verbose = verbose
         self.ignore_file_cache = {}
 
         if git_dname:
@@ -92,9 +94,16 @@ class GitRepo:
         # https://github.com/gitpython-developers/GitPython/issues/427
         self.repo = git.Repo(repo_paths.pop(), odbt=git.GitDB)
         self.root = utils.safe_abs_path(self.repo.working_tree_dir)
+        self.cwd_path = self.get_cwd_path()
 
         if aider_ignore_file:
             self.aider_ignore_file = Path(aider_ignore_file)
+
+    def get_cwd_path(self):
+        try:
+            return Path.cwd().resolve().relative_to(Path(self.root).resolve())
+        except ValueError:
+            return None
 
     def commit(self, fnames=None, context=None, message=None, aider_edits=False):
         if not fnames and not self.repo.is_dirty():
@@ -278,7 +287,19 @@ class GitRepo:
                 files = self.tree_files[commit]
             else:
                 try:
-                    for blob in commit.tree.traverse():
+                    start_time = time.perf_counter_ns()
+                    tree = commit.tree
+
+                    # Drop files that are not under cwd
+                    normalized_cwd_path = self.normalize_path(self.cwd_path)
+                    if (
+                        self.subtree_only
+                        and normalized_cwd_path
+                        and normalized_cwd_path != "."
+                    ):
+                        tree = tree / normalized_cwd_path
+
+                    for blob in tree.traverse():
                         if blob.type == "blob":  # blob is a file
                             files.add(blob.path)
                 except ANY_GIT_ERROR as err:
@@ -286,13 +307,36 @@ class GitRepo:
                     self.io.tool_error(f"Unable to list files in git repo: {err}")
                     self.io.tool_output("Is your git repo corrupted?")
                     return []
+                finally:
+                    end_time = time.perf_counter_ns()
+                    if self.verbose:
+                        self.io.tool_output(
+                            f"GitRepo.get_tracked_files: processed {len(files)} tree files in {(end_time - start_time) / 1e9:.4f} seconds"
+                        )
                 files = set(self.normalize_path(path) for path in files)
                 self.tree_files[commit] = set(files)
 
         # Add staged files
         index = self.repo.index
-        staged_files = [path for path, _ in index.entries.keys()]
-        files.update(self.normalize_path(path) for path in staged_files)
+
+        start_time = time.perf_counter_ns()
+        staged_files = (path for path, _ in index.entries.keys())
+
+        # Drop files not under cwd
+        if self.subtree_only and self.cwd_path:
+            normalized_cwd_path = self.normalize_path(self.cwd_path)
+            staged_files = (
+                path for path in staged_files if path.startswith(normalized_cwd_path)
+            )
+
+        staged_files = set(self.normalize_path(path) for path in staged_files)
+        files.update(staged_files)
+
+        end_time = time.perf_counter_ns()
+        if self.verbose:
+            self.io.tool_output(
+                f"GitRepo.get_tracked_files: processed {len(staged_files)} stage files in {(end_time - start_time) / 1e9:.4f} seconds"
+            )
 
         res = [fname for fname in files if not self.ignored_file(fname)]
 
@@ -343,17 +387,15 @@ class GitRepo:
 
     def ignored_file_raw(self, fname):
         if self.subtree_only:
-            fname_path = Path(self.normalize_path(fname))
-            try:
-                cwd_path = Path.cwd().resolve().relative_to(Path(self.root).resolve())
-            except ValueError:
+            if not self.cwd_path:
                 # Issue #1524
                 # ValueError: 'C:\\dev\\squid-certbot' is not in the subpath of
                 # 'C:\\dev\\squid-certbot'
                 # Clearly, fname is not under cwd... so ignore it
                 return True
 
-            if cwd_path not in fname_path.parents and fname_path != cwd_path:
+            fname_path = Path(self.normalize_path(fname))
+            if self.cwd_path not in fname_path.parents and fname_path != self.cwd_path:
                 return True
 
         if not self.aider_ignore_file or not self.aider_ignore_file.is_file():
